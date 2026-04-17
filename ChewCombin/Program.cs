@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -25,9 +25,11 @@ namespace DanMerger
         {
             Console.OutputEncoding = Encoding.UTF8;
             Console.WriteLine("=== 段位谱合并工具ver 1.0 ===\n");
-            Console.WriteLine("=== writr by.Chewwwwwwyaaaaaaa ===\n");
+            Console.WriteLine("=== write by.Chewwwwwwyaaaaaaa ===\n");
+            try
+            {
 
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
 
             string songsDir = Path.Combine(baseDir, "songs");
             string relaxDir = Path.Combine(baseDir, "relax");
@@ -234,7 +236,20 @@ namespace DanMerger
             try { Directory.Delete(tempDir, true); } catch { }
 
             Console.WriteLine("\n全部完成！按任意键退出...");
-            Console.ReadKey();
+        }
+            //防报错
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\n发生错误: {ex.Message}");
+                Console.WriteLine("详细信息：");
+                Console.WriteLine(ex.StackTrace);
+            }
+            finally
+            {
+                Console.WriteLine("\n按回车键退出...");
+                Console.ReadLine();
+            }
+                //Console.ReadKey();
         }
 
         static bool TryParseTime(string timeStr, out long ms)
