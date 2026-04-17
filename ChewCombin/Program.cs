@@ -11,12 +11,14 @@ using System.IO.Compression;
 // 因为FFmpeg的神秘小巧思，如果裁剪点不在帧头上，可能会补齐静音导致无法对其音频
 // 问了ai也没招了(debug了1小时，呜呜呜
 // 用MP3得从总时长反推每个谱面的起始偏移，我懒
-// 所以这里的处理是改成mav，然后算实际物理长度。导致一堆屎山
+// 所以这里的处理是改成ogg，然后算实际物理长度(具体为什么请看下面)。导致一堆屎山
 
 // [屎山注意]
 // CropAudio 和 AddFade 强制指定了 -ar 44100 -ac 2 -c:a pcm_s16le，这是为了保证所有片段采样率、声道数一致，避免 concat 失败。
 // GetAudioDuration 仍然复用 ffmpeg 解析 Duration 字符串，但对于 WAV 文件是精确的。
-// 解码为 WAV 后长度可能有微小变化，所以才用实际长度累加
+// 之前用的WAV解码后长度可能有微小变化，所以才用实际长度累加，不过写了都写了，接着用吧。
+// 因为红线的处理是即时的，所以加绿线我是先预处理了
+// 感谢 gemini 大人的倾城协助
 namespace DanMerger
 {
     class Program
@@ -24,10 +26,16 @@ namespace DanMerger
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
-            Console.WriteLine("=== 段位谱合并工具ver 1.0 ===\n");
-            Console.WriteLine("=== writr by.Chewwwwwwyaaaaaaa ===\n");
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("=== 段位谱合并工具ver 1.02 ===");
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("项目链接:https://github.com/YakumoZn/ChewCombine/");
+            Console.WriteLine("write by.Chewwwwwwyaaaaaaa ===\n");
+            Console.ResetColor();
+            try
+            {
 
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
 
             string songsDir = Path.Combine(baseDir, "songs");
             string relaxDir = Path.Combine(baseDir, "relax");
@@ -42,9 +50,9 @@ namespace DanMerger
 
             // 清理上次遗留的 dan.osu 和 dan.wav
             string oldOsu = Path.Combine(createDir, "dan.osu");
-            string oldWav = Path.Combine(createDir, "dan.wav");
+            string oldOgg = Path.Combine(createDir, "dan.ogg");
             if (File.Exists(oldOsu)) File.Delete(oldOsu);
-            if (File.Exists(oldWav)) File.Delete(oldWav);
+            if (File.Exists(oldOgg)) File.Delete(oldOgg);
 
             // 检查必要文件是否存在
             if (!File.Exists(Path.Combine(imgDir, "bg.png")))
@@ -117,7 +125,30 @@ namespace DanMerger
                 });
             }
 
-            string tempDir = Path.Combine(Path.GetTempPath(), "DanMerger_" + Guid.NewGuid().ToString());
+            // 因为屎山原因先预处理
+            for (int i = 0; i < maps.Count; i++)
+            {
+                var map = maps[i];
+                (map.r_Length, map.BaseBPM) = GetMapLength(map.OsuPath, map.StartMs, map.EndMs);
+                Console.WriteLine($"谱面 {map.FolderName}: 时长 {map.r_Length} ms, BPM = {map.BaseBPM:F2}");
+            }
+
+            // 找出主 BPM（时长最长的谱面的 BPM）
+            double masterBPM = 120;
+            long maxLength = 0;
+            foreach (var map in maps)
+            {
+                if (map.r_Length > maxLength)
+                {
+                    maxLength = map.r_Length;
+                    masterBPM = map.BaseBPM;
+                }
+            }
+            // Console.WriteLine($"debug: masterBPM = {masterBPM:F2} \n");
+
+
+
+                string tempDir = Path.Combine(Path.GetTempPath(), "DanMerger_" + Guid.NewGuid().ToString());
             Directory.CreateDirectory(tempDir);
 
             Console.WriteLine("\n开始处理音频...");
@@ -142,7 +173,7 @@ namespace DanMerger
                 // 解析谱面
                 ParseOsu(map.OsuPath, out var timings, out var hits);
 
-                // 调试：打印当前偏移量（累加前）
+                // 打印当前偏移量（累加前）
                 Console.WriteLine($"  当前偏移量 (累加前): {currentOffset} ms");
 
                 // 偏移 TimingPoints
@@ -155,22 +186,36 @@ namespace DanMerger
                     }
                 }
                 // 因为可能会有没有红线的情况(因为note结束实际和音频结束时间不一定是一样的)没有则在起始处重添加一条
+                long firstRedTime = -1;
                 bool hasRed = false;
-                foreach (var tp in timings)  // 注意：这里遍历的是原始 timings（未过滤的），但只关心在裁剪区间内的
+
+                // 先检查裁剪区间内是否有红线
+                foreach (var tp in timings)
                 {
                     if (tp.Time >= map.StartMs && tp.Time <= map.EndMs && tp.Uninherited == 1)
                     {
                         hasRed = true;
+                        firstRedTime = currentOffset + (tp.Time - map.StartMs);
                         break;
                     }
                 }
+
+                // 如果没有红线，则添加默认红线（取原谱面的第一个红线 BPM，否则 120）
                 if (!hasRed)
                 {
-                    // 在谱面起始位置添加一条默认红线（120 BPM，4/4）
+                    double defaultBeatLength = 500; // 120 BPM
+                    foreach (var tp in timings)
+                    {
+                        if (tp.Uninherited == 1)
+                        {
+                            defaultBeatLength = tp.BeatLength;
+                            break;
+                        }
+                    }
                     var defaultRed = new TimingPoint
                     {
-                        Time = currentOffset,   // 该谱面在最终音频中的起始时间
-                        BeatLength = 500,       // 120 BPM = 500ms/拍
+                        Time = currentOffset,
+                        BeatLength = defaultBeatLength,
                         Meter = 4,
                         SampleSet = 0,
                         SampleIndex = 0,
@@ -179,10 +224,32 @@ namespace DanMerger
                         Effects = 0
                     };
                     allTimingPoints.Add(defaultRed);
-                    Console.WriteLine($"   {map.FolderName} ， {currentOffset} ms 默认红线");
+                    firstRedTime = currentOffset;
+                    Console.WriteLine($"{map.FolderName} 无红线，已在 {currentOffset} ms 处添加默认红线");
                 }
-                // 偏移 HitObjects
-                foreach (var hit in hits)
+
+                    // 加绿线
+                    // 倍率 = 主BPM / 谱面BPM
+                    double ratio = masterBPM / map.BaseBPM;
+                    double greenBeatLength = -100 / ratio;
+                    var greenLine = new TimingPoint
+                    {
+                        Time = firstRedTime,
+                        BeatLength = greenBeatLength,
+                        Meter = 4,
+                        SampleSet = 0,
+                        SampleIndex = 0,
+                        Volume = 100,
+                        Uninherited = 0,
+                        Effects = 0
+                    };
+                    allTimingPoints.Add(greenLine);
+                    Console.WriteLine($"  绿线: 时间 {firstRedTime} ms, 倍率 {ratio:F2} (主BPM {masterBPM:F2} / 谱面BPM {map.BaseBPM:F2})");
+
+
+
+                    // 偏移 HitObjects
+                    foreach (var hit in hits)
                 {
                     if (hit.StartTime >= map.StartMs && hit.StartTime <= map.EndMs)
                     {
@@ -218,7 +285,7 @@ namespace DanMerger
             }
 
             Directory.CreateDirectory(createDir);
-            string finalAudio = Path.Combine(createDir, "dan.wav");
+            string finalAudio = Path.Combine(createDir, "dan.ogg");
             ConcatAudio(audioSegments, finalAudio);
             Console.WriteLine($"音频生成: {finalAudio}");
 
@@ -234,7 +301,20 @@ namespace DanMerger
             try { Directory.Delete(tempDir, true); } catch { }
 
             Console.WriteLine("\n全部完成！按任意键退出...");
-            Console.ReadKey();
+        }
+            //防报错
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\n发生错误: {ex.Message}");
+                Console.WriteLine("详细信息：");
+                Console.WriteLine(ex.StackTrace);
+            }
+            finally
+            {
+                Console.WriteLine("\n按回车键退出...");
+                Console.ReadLine();
+            }
+                //Console.ReadKey();
         }
 
         static bool TryParseTime(string timeStr, out long ms)
@@ -362,8 +442,8 @@ namespace DanMerger
         {
             string listFile = Path.GetTempFileName();
             File.WriteAllLines(listFile, files.Select(f => $"file '{f}'"));
-            // 输出为 16bit 44.1kHz 立体声 WAV
-            RunFFmpeg($"-f concat -safe 0 -i \"{listFile}\" -c:a pcm_s16le -ar 44100 -ac 2 \"{output}\"");
+            // 输出为OGG 质量 -q:a 3
+            RunFFmpeg($"-f concat -safe 0 -i \"{listFile}\" -c:a libvorbis -q:a 3 \"{output}\"");
             File.Delete(listFile);
         }
 
@@ -433,6 +513,33 @@ namespace DanMerger
                     }
                 }
             }
+        }
+        static (long duration, double bpm) GetMapLength(string osuPath, long startMs, long endMs)
+        {
+            long duration = endMs - startMs;
+            double bpm = 120.0;
+
+            ParseOsu(osuPath, out var timings, out _);
+            // 优先找裁剪区间内的红线
+            foreach (var tp in timings)
+            {
+                if (tp.Time >= startMs && tp.Time <= endMs && tp.Uninherited == 1)
+                {
+                    bpm = 60000.0 / tp.BeatLength;
+                    return (duration, bpm);
+                }
+            }
+            // 区间内没有，则找第一个红线
+            foreach (var tp in timings)
+            {
+                if (tp.Uninherited == 1)
+                {
+                    bpm = 60000.0 / tp.BeatLength;
+                    return (duration, bpm);
+                }
+            }
+            // 防意外，啥也没有使用120，不然会崩溃
+            return (duration, bpm);
         }
 
         // 纯手工初始化谱面文件, 不嘻嘻(指.osu
@@ -534,6 +641,8 @@ namespace DanMerger
         public string AudioPath;
         public long StartMs;
         public long EndMs;
+        public long r_Length;// 裁剪后真实时长
+        public double BaseBPM;
     }
 
     class TimingPoint
