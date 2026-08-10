@@ -2,6 +2,8 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+ChewCombine v2：[https://github.com/YakumoZn/ChewCombine](https://github.com/YakumoZn/ChewCombine-v2)
+
 **ChewCombine** 是一个专为 osu! 4K 段位吃和谱师设计的工具，能够将多个独立的谱面自动合并成一个完整的段位谱。  
 自动处理音频裁剪，淡入淡出，休息段插入，并最终输出可直接导入 osu! 的 `.osz` 包。
 
